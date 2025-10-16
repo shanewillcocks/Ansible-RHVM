@@ -1,0 +1,6 @@
+---
+# URL not needed using AAP RHV credential
+prd_rhvm_url: "https://prod-rhvm.com/ovirt-engine/api"
+lab_rhvm_url: "https://npr-rhvm.com/ovirt-engine/api"
+debug_mode: true
+test_only: "{{ dry_run | default(true) }}"
