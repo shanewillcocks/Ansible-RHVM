@@ -1,0 +1,151 @@
+---
+- name: Authenticate to RHVM API
+  ansible.builtin.include_tasks: ovirt_auth.yml
+
+- name: Log AAP survey inputs
+  ansible.builtin.debug:
+    msg: "Adding {{ increase_size_gb }}GB to volume {{ target_volume }} on VM {{ target_vm }}"
+
+- ansible.builtin.debug:
+    msg: "Note: This is a dry run only, no changes will be made. Set AAP survey item dry_run = false to run disk expansion"
+  when: test_only | bool
+
+- name: Collect VM disk related info from RHVM
+  redhat.rhv.ovirt_vm_info:
+    auth: "{{ ovirt_auth }}"
+    pattern: name="{{ target_vm }}"
+    follow:
+      - disk_attachments
+      - disk_attachments.disk
+  register: ovirt_vm_info_reg
+
+- name: Dump VM info
+  ansible.builtin.debug:
+    var: ovirt_vm_info_reg
+  when: debug_mode | bool
+
+- name: Set the correct RHVM volume name
+  block:
+    - ansible.builtin.set_fact:
+        rhvm_volume: "{{ target_vm }}_boot"
+      when: target_volume is match("boot volume")
+    - ansible.builtin.set_fact:
+        rhvm_volume: "{{ target_vm }}_data"
+      when: target_volume is match("data volume")
+    - ansible.builtin.set_fact:
+        rhvm_volume: "{{ target_vm }}_system"
+      when: target_volume is match("system volume")
+
+# The follow parameter causes this task to fail, so we cannot get extra info on the storage domain here, fix this later
+- name: "Get disk info for target volume {{ rhvm_volume }}"
+  redhat.rhv.ovirt_disk_info:
+    auth: "{{ ovirt_auth }}"
+    pattern: name="{{ rhvm_volume }}"
+  register: ovirt_disk_info_reg
+
+- name: Dump disk info
+  ansible.builtin.debug:
+    var: ovirt_disk_info_reg
+  when: debug_mode | bool
+
+- name: Set fact for VM ID
+  ansible.builtin.set_fact:
+    vm_id: "{{ ovirt_vm_info_reg.ovirt_vms[0].id }}"
+
+- name: Sets facts for disk ID
+  block:
+    - ansible.builtin.set_fact:
+        disk_id: "{{ ovirt_disk_info_reg.ovirt_disks[0].id }}"
+    - ansible.builtin.set_fact:
+        disk_href: "{{ ovirt_disk_info_reg.ovirt_disks[0].href }}"
+
+- name: Set fact for storage domain ID
+  ansible.builtin.set_fact:
+    storage_domain_id: "{{ ovirt_disk_info_reg.ovirt_disks[0].storage_domains[0].id }}"
+
+# Find all storage domains and loop them looking for the target ID, this is messy but we cannot get the name value any other way apparently
+- name: Retrieve all storage domains
+  redhat.rhv.ovirt_storage_domain_info:
+    auth: "{{ ovirt_auth }}"
+    pattern: name=*
+  register: ovirt_all_storage_domains_info_reg
+
+- ansible.builtin.debug:
+    msg: "RHVM returned {{ ovirt_all_storage_domains_info_reg.ovirt_storage_domains | length }} Storage Domains"
+
+- name: "Loop Storage Domains and extract name for target ID {{ storage_domain_id }}"
+  ansible.builtin.set_fact:
+    storage_domain_name: "{{ item.name }}"
+  when: item.id == storage_domain_id
+  loop: "{{ ovirt_all_storage_domains_info_reg.ovirt_storage_domains }}"
+  no_log: true
+
+- ansible.builtin.debug:
+    msg: "Found {{ rhvm_volume }} on Storage Domain {{ storage_domain_name }} with current size {{ ovirt_disk_info_reg.ovirt_disks[0].provisioned_size | int / 1024 / 1024 / 1024 }}GB"
+
+- name: Set fact for new total disk size
+  ansible.builtin.set_fact:
+    new_total_size: "{{ ( ovirt_disk_info_reg.ovirt_disks[0].provisioned_size | int / 1024 / 1024 / 1024 ) + ( increase_size_gb | int ) }}"
+
+- ansible.builtin.debug:
+    msg: "New total size for volume {{ rhvm_volume }} will be {{ new_total_size }}GB"
+
+- name: Check freespace on the Storage Domain
+  block:
+    - name: Retrieve storage domain info
+      redhat.rhv.ovirt_storage_domain_info:
+        auth: "{{ ovirt_auth }}"
+        pattern: name="{{ storage_domain_name }}"
+      register: ovirt_storage_domain_info_reg
+    - name: Set fact for available space on Storage domain
+      ansible.builtin.set_fact:
+        sd_available_space: "{{ ovirt_storage_domain_info_reg.ovirt_storage_domains[0].available | int / 1024 / 1024 / 1024 }}"
+    - ansible.builtin.debug:
+        msg: "Storage domain {{ storage_domain_name }} has {{ sd_available_space }}GB available"
+
+- name: Fail if insufficient freespace exists on Storage Domain
+  ansible.builtin.fail:
+    msg: "Cannot expand disk as insufficient freespace exists on Storage Doman {{ storage_domain_name }}"
+  when: new_total_size | int  >= sd_available_space | int
+
+- ansible.builtin.debug:
+    msg: "Sufficient freespace exists on Storage Domain, OK to proceed with disk expansion to {{ new_total_size }}GB"
+
+- ansible.builtin.debug:
+    msg: "All checks passed"
+
+- name: Stop VM if running
+  ansible.builtin.include_tasks: stop_vm.yml
+  when: ovirt_vm_info_reg.ovirt_vms[0].status is match("up") and ( not test_only | bool )
+
+# Need to reset the power status flag as the above task is skipped if the VM is already down
+- name: Reset power status flag
+  redhat.rhv.ovirt_vm_info:
+    auth: "{{ ovirt_auth }}"
+    pattern: name="{{ target_vm }}"
+    all_content: true
+  register: vm_power_state_reg
+
+# This only works with RHVM >= v4.4 so we are currently blocked on the RHVM upgrade from v4.3
+# Re: https://github.com/oVirt/ovirt-ansible-collection/issues/362
+- name: Run disk expansion as sufficient freespace exists
+  block:
+    - ansible.builtin.debug:
+        msg: "Running disk expansion"
+    - redhat.rhv.ovirt_disk:
+        auth: "{{ ovirt_auth }}"
+        name: "{{ rhvm_volume }}"
+        vm_name: "{{ target_vm }}"
+        size: "{{ new_total_size }}GiB"
+  when: ( new_total_size | int  < sd_available_space | int ) and ( not test_only | bool )
+
+# Temporary workaround if RVM < v4.4
+#- ansible.builtin.include_tasks: disk_api_call.yml
+#  when: ( new_total_size | int  < sd_available_space | int ) and ( not test_only | bool )
+
+- name: Restart VM
+  ansible.builtin.include_tasks: start_vm.yml
+  when: vm_power_state_reg.ovirt_vms[0].status is match("down") and ( not test_only | bool )
+
+- name: Revoke authentication token
+  ansible.builtin.include_tasks: revoke_ovirt_auth.yml
