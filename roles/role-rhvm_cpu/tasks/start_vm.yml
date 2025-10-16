@@ -1,0 +1,21 @@
+---
+- name: Restart VM
+  block:
+    - ansible.builtin.debug:
+        msg: "Starting VM..."
+    - redhat.rhv.ovirt_vm:
+        auth: "{{ ovirt_auth }}"
+        name: "{{ target_vm }}"
+        state: running
+    - ansible.builtin.debug:
+        msg: "Waiting for server to complete startup..."
+    - redhat.rhv.ovirt_vm_info:
+        auth: "{{ ovirt_auth }}"
+        all_content: true
+        pattern: name="{{ target_vm }}"
+      register: is_started_reg
+      until: is_started_reg.ovirt_vms[0].status is match("up")
+      retries: 10
+      delay: 30
+    - ansible.builtin.debug:
+        msg: "VM {{ target_vm }} is {{ is_started_reg.ovirt_vms[0].status }}"
