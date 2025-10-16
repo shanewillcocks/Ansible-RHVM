@@ -1,0 +1,6 @@
+---
+- name: Revoke SSO token
+  redhat.rhv.ovirt_auth:
+    state: absent
+    ovirt_auth: "{{ ovirt_auth }}"
+  register: revoke_auth_reg
