@@ -1,0 +1,58 @@
+---
+- ansible.builtin.set_fact:
+    new_total_size_bytes: "{{ new_total_size | int * 1024 * 1024 * 1024 }}"
+
+- name: Deactivate disk via API call
+  ansible.builtin.uri:
+    url: "{{ lab_rhvm_url }}/vms/{{ vm_id }}/diskattachments/{{ disk_id }}"
+    method: PUT
+    headers:
+      Content-Type: application/xml;charset=UTF-8
+      Authorization: "Bearer {{ ovirt_auth.token }}"
+    body_format: raw
+    body: <disk_attachment><disk><active>false</active></disk></disk_attachment>
+    status_code: [200, 201]
+  register: deactivate_disk_reg
+  when: new_total_size | int  < sd_available_space | int
+
+- name: Pause for deactivation to complete
+  ansible.builtin.pause:
+    seconds: 15
+
+- name: Format XML for expansion API call
+  ansible.builtin.set_fact:
+    expand_xml_body: "<disk_attachment><disk><provisioned_size>{{ new_total_size_bytes }}</provisioned_size></disk></disk_attachment>"
+
+- name: Run disk expansion via API call
+  ansible.builtin.uri:
+    url: "{{ lab_rhvm_url }}/vms/{{ vm_id }}/diskattachments/{{ disk_id }}"
+    method: PUT
+    headers:
+      Content-Type: application/xml;charset=UTF-8
+      Authorization: "Bearer {{ ovirt_auth.token }}"
+    body_format: raw
+    body: "{{ expand_xml_body }}"
+    status_code: [200, 201]
+  register: expand_disk_reg
+  when: new_total_size | int  < sd_available_space | int
+
+- name: Pause for 30 seconds for expansion request to complete
+  ansible.builtin.pause:
+    seconds: 30
+
+- name: Reactivate disk via API call
+  ansible.builtin.uri:
+    url: "{{ lab_rhvm_url }}/vms/{{ vm_id }}/diskattachments/{{ disk_id }}"
+    method: PUT
+    headers:
+      Content-Type: application/xml;charset=UTF-8
+      Authorization: "Bearer {{ ovirt_auth.token }}"
+    body_format: raw
+    body: <disk_attachment><disk><active>true</active></disk></disk_attachment>
+    status_code: [200, 201]
+  register: reactivate_disk_reg
+  when: new_total_size | int  < sd_available_space | int
+
+- name: Dump disk expansion API request response
+  ansible.builtin.debug:
+    var: expand_disk_reg
