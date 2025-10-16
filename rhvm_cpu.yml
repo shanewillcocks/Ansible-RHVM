@@ -1,0 +1,7 @@
+---
+# Requires authentication with AAP Red Hat Virtualization credential type
+- hosts: all
+  become: false 
+  gather_facts: false
+  roles:
+    - role-rhvm_cpu
