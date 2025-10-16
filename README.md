@@ -1,2 +1,2 @@
 # Ansible-RHVM
-Ansible role to manage VM's via the RHVM API 
+Ansible roles to manage VM's via the RHVM API - disk, CPU, memory and power cycling
